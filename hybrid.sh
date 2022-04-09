@@ -1,4 +1,7 @@
+#!/usr/bin/bash
 
+# Global variables
+ipsec_psk='Microsoft123'
 
 #########
 # Azure #
@@ -50,6 +53,7 @@ vpc_prefix='172.16.0.0/16'
 subnet1_prefix='172.16.1.0/24'
 subnet2_prefix='172.16.2.0/24'
 vgw_asn=65002
+ipsec_startup_action='start'
 
 # Create Key Pair if not there
 kp_id=$(aws ec2 describe-key-pairs --key-name $kp_name --query 'KeyPairs[0].KeyPairId' --output text)
@@ -118,9 +122,37 @@ vgw_id=$(aws ec2 create-vpn-gateway --type 'ipsec.1' --amazon-side-asn $vgw_asn 
 vpc_id=$(aws ec2 describe-vpcs --filters "Name=cidr-block,Values=$vpc_prefix" --query 'Vpcs[0].VpcId' --output text) && echo "$vpc_id"
 aws ec2 attach-vpn-gateway --vpn-gateway-id "$vgw_id" --vpc-id "$vpc_id"
 aws ec2 describe-vpcs --vpc-id "$vpc_id"
-aws ec2 enable-vgw-route-propagation --gateway-id --route-table-id
+rt_id=$(aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet1_id'`].RouteTableId' --output text)
+aws ec2 enable-vgw-route-propagation --gateway-id "$vgw_id" --route-table-id "$rt_id"
 
 # Create 2 tunnels, one to each CGW
+cgw0_id=$(aws ec2 describe-customer-gateways --filters "Name=device-name,Values=vpngw-0" --query 'CustomerGateways[*].CustomerGatewayId' --output text)
+cgw1_id=$(aws ec2 describe-customer-gateways --filters "Name=device-name,Values=vpngw-1" --query 'CustomerGateways[*].CustomerGatewayId' --output text)
+vpncx0_options="{\"TunnelOptions\": [ 
+    {\"TunnelInsideCidr\": \"169.254.21.0/30\", \"PreSharedKey\": \"$ipsec_psk\", \"StartupAction\": \"$ipsec_startup_action\" },
+    {\"TunnelInsideCidr\": \"169.254.21.4/30\", \"PreSharedKey\": \"$ipsec_psk\", \"StartupAction\": \"$ipsec_startup_action\" } 
+    ] }"
+vpncx1_options="{\"TunnelOptions\": [ 
+    {\"TunnelInsideCidr\": \"169.254.22.0/30\", \"PreSharedKey\": \"$ipsec_psk\", \"StartupAction\": \"$ipsec_startup_action\" },
+    {\"TunnelInsideCidr\": \"169.254.22.4/30\", \"PreSharedKey\": \"$ipsec_psk\", \"StartupAction\": \"$ipsec_startup_action\" } 
+    ] }"
+aws ec2 create-vpn-connection --vpn-gateway-id "$vgw_id" --customer-gateway-id "$cgw0_id" --type 'ipsec.1' --options "$vpncx0_options"
+aws ec2 create-vpn-connection --vpn-gateway-id "$vgw_id" --customer-gateway-id "$cgw1_id" --type 'ipsec.1' --options "$vpncx1_options"
+
+# Get public and private IPs for each connection (each connection has 2 tunnels)
+vpncx0_id=$(aws ec2 describe-vpn-connections --filters "Name=customer-gateway-id,Values=$cgw0_id" --query 'VpnConnections[0].VpnConnectionId' --output text)
+vpncx1_id=$(aws ec2 describe-vpn-connections --filters "Name=customer-gateway-id,Values=$cgw1_id" --query 'VpnConnections[0].VpnConnectionId' --output text)
+aws0toaz0_pip=$(aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].OutsideIpAddress' --output text)
+while [[ "$aws0toaz0" == "None" ]]; do
+    sleep 30
+    aws0toaz0_pip=$(aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].OutsideIpAddress' --output text)
+done
+aws1toaz0_pip=$(aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[1].OutsideIpAddress' --output text)
+aws0toaz1_pip=$(aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[0].Options.TunnelOptions[0].OutsideIpAddress' --output text)
+aws1toaz1_pip=$(aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[0].Options.TunnelOptions[1].OutsideIpAddress' --output text)
+echo "Public IP addresses allocated to the tunnels: $aws0toaz0_pip, $aws0toaz1_pip, $aws1toaz0_pip, $aws1toaz1_pip"
+# aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].TunnelInsideCidr' --output text
+# aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].PreSharedKey' --output text
 
 ###############
 # Diagnostics #
@@ -134,6 +166,8 @@ aws ec2 describe-subnets --subnet-id "$subnet1_id"
 aws ec2 describe-subnets --subnet-id "$subnet2_id"
 aws ec2 describe-route-tables --query 'RouteTables[].[RouteTableId,VpcId]' --output text
 aws ec2 describe-route-tables --query 'RouteTables[?VpcId==`'$vpc_id'`].[RouteTableId,VpcId]' --output text
+aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet1_id'`].[RouteTableId,SubnetId]' --output text
+aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet2_id'`].[RouteTableId,SubnetId]' --output text
 aws ec2 describe-vpn-gateways --query 'VpnGateways[*].[VpnGatewayId,State,AmazonSideAsn,VpcAttachments[0].VpcId]' --output text
 aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId,VpnGatewayId,CustomerGatewayId,State]' --output text
 aws ec2 describe-customer-gateways --query 'CustomerGateways[*].[CustomerGatewayId,DeviceName,BgpAsn,IpAddress,State]' --output text
