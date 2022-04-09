@@ -36,7 +36,6 @@ vpngw_pip_1=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSet
 vpngw_private_ip_1=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv) && echo $vpngw_private_ip_1
 vpngw_asn=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.asn' -o tsv) && echo $vpngw_asn
 
-
 #######
 # AWS #
 #######
@@ -78,16 +77,16 @@ fi
 aws ec2 modify-subnet-attribute --subnet-id "$subnet1_id" --map-public-ip-on-launch
 aws ec2 modify-subnet-attribute --subnet-id "$subnet2_id" --map-public-ip-on-launch
 
-# Route table
-rt_id=$(aws ec2 create-route-table --vpc-id "$vpc_id" --query RouteTable.RouteTableId --output text)
-aws ec2 create-route --route-table-id "$rt_id" --destination-cidr-block 0.0.0.0/0 --gateway-id "$igw_id"
-aws ec2 associate-route-table  --subnet-id "$subnet1_id" --route-table-id "$rt_id"
-aws ec2 associate-route-table  --subnet-id "$subnet2_id" --route-table-id "$rt_id"
-
 # If subnet and VPC already existed
 vpc_id=$(aws ec2 describe-vpcs --filters "Name=cidr-block,Values=$vpc_prefix" --query 'Vpcs[0].VpcId' --output text)
 subnet1_id=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc_id" "Name=cidr-block,Values=$subnet1_prefix" --query 'Subnets[0].SubnetId' --output text)
 subnet2_id=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc_id" "Name=cidr-block,Values=$subnet2_prefix" --query 'Subnets[0].SubnetId' --output text)
+
+# Route table
+rt_id=$(aws ec2 create-route-table --vpc-id "$vpc_id" --query RouteTable.RouteTableId --output text)
+aws ec2 create-route --route-table-id "$rt_id" --destination-cidr-block 0.0.0.0/0 --gateway-id "$igw_id"
+aws ec2 associate-route-table --subnet-id "$subnet1_id" --route-table-id "$rt_id"
+aws ec2 associate-route-table --subnet-id "$subnet2_id" --route-table-id "$rt_id"
 
 # Create SG
 aws ec2 create-security-group --group-name $sg_name --description "Test SG" --vpc-id "$vpc_id"
@@ -109,18 +108,36 @@ user=ec2-user
 ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -i "$pemfile" "${user}@${instance1_pip}" "ip a"
 ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -i "$pemfile" "${user}@${instance2_pip}" "ip a"
 
-# Create CGW
-cgw_type=$(aws ec2 get-vpn-connection-device-types --query 'VpnConnectionDeviceTypes[?starts_with(Vendor,`Generic`)]|[0].VpnConnectionDeviceTypeId' --output text)
+# Create CGWs for Azure (2 required)
+# cgw_type=$(aws ec2 get-vpn-connection-device-types --query 'VpnConnectionDeviceTypes[?starts_with(Vendor,`Generic`)]|[0].VpnConnectionDeviceTypeId' --output text)
 aws ec2 create-customer-gateway --bgp-asn "$vpngw_asn" --public-ip "$vpngw_pip_0" --device-name vpngw-0 --type 'ipsec.1'
 aws ec2 create-customer-gateway --bgp-asn "$vpngw_asn" --public-ip "$vpngw_pip_1" --device-name vpngw-1 --type 'ipsec.1'
+
+# Create VGW and attach to VPC
+vgw_id=$(aws ec2 create-vpn-gateway --type 'ipsec.1' --amazon-side-asn $vgw_asn --query 'VpnGateway.VpnGatewayId' --output text)
+vpc_id=$(aws ec2 describe-vpcs --filters "Name=cidr-block,Values=$vpc_prefix" --query 'Vpcs[0].VpcId' --output text) && echo "$vpc_id"
+aws ec2 attach-vpn-gateway --vpn-gateway-id "$vgw_id" --vpc-id "$vpc_id"
+aws ec2 describe-vpcs --vpc-id "$vpc_id"
+aws ec2 enable-vgw-route-propagation --gateway-id --route-table-id
+
+# Create 2 tunnels, one to each CGW
 
 ###############
 # Diagnostics #
 ###############
 
+aws ec2 describe-vpcs --query 'Vpcs[].[VpcId,CidrBlock]' --output text
+aws ec2 describe-vpcs --vpc-id "$vpc_id"
+aws ec2 describe-subnets --query 'Subnets[].[SubnetId,CidrBlock,VpcId]' --output text
+aws ec2 describe-subnets --query 'Subnets[?VpcId==`'$vpc_id'`].[SubnetId,CidrBlock,VpcId]' --output text
+aws ec2 describe-subnets --subnet-id "$subnet1_id"
+aws ec2 describe-subnets --subnet-id "$subnet2_id"
+aws ec2 describe-route-tables --query 'RouteTables[].[RouteTableId,VpcId]' --output text
+aws ec2 describe-route-tables --query 'RouteTables[?VpcId==`'$vpc_id'`].[RouteTableId,VpcId]' --output text
 aws ec2 describe-vpn-gateways --query 'VpnGateways[*].[VpnGatewayId,State,AmazonSideAsn,VpcAttachments[0].VpcId]' --output text
 aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId,VpnGatewayId,CustomerGatewayId,State]' --output text
 aws ec2 describe-customer-gateways --query 'CustomerGateways[*].[CustomerGatewayId,DeviceName,BgpAsn,IpAddress,State]' --output text
+aws ec2 describe-security-groups --group-names "$sg_name"
 
 
 ###########
