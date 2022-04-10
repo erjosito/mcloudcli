@@ -39,6 +39,27 @@ vpngw_pip_1=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bg
 vpngw_private_ip_1=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv) && echo "$vpngw_private_ip_1"
 vpngw_asn=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.asn' -o tsv) && echo "$vpngw_asn"
 
+# Logs
+logws_name=$(az monitor log-analytics workspace list -g $rg --query "[?location=='${location}'].name" -o tsv)
+if [[ -z "$logws_name" ]]
+then
+    logws_name=log$RANDOM
+    echo "INFO: Creating log analytics workspace ${logws_name} in ${location}..."
+    az monitor log-analytics workspace create -n $logws_name -g $rg -l $location -o none
+else
+    echo "INFO: Log Analytics workspace $logws_name in $location found in resource group $rg"
+fi
+logws_id=$(az resource list -g $rg -n $logws_name --query '[].id' -o tsv)
+logws_customerid=$(az monitor log-analytics workspace show -n $logws_name -g $rg --query customerId -o tsv)
+vpngw_id=$(az network vnet-gateway show -n $vpngw_name -g $rg --query id -o tsv)
+az monitor diagnostic-settings create -n vpndiag --resource "$vpngw_id" --workspace "$logws_id" \
+    --metrics '[{"category": "AllMetrics", "enabled": true, "retentionPolicy": {"days": 0, "enabled": false }, "timeGrain": null}]' \
+    --logs '[{"category": "GatewayDiagnosticLog", "enabled": true, "retentionPolicy": {"days": 0, "enabled": false}}, 
+            {"category": "TunnelDiagnosticLog", "enabled": true, "retentionPolicy": {"days": 0, "enabled": false}},
+            {"category": "RouteDiagnosticLog", "enabled": true, "retentionPolicy": {"days": 0, "enabled": false}},
+            {"category": "IKEDiagnosticLog", "enabled": true, "retentionPolicy": {"days": 0, "enabled": false}}]' -o none
+
+
 #######
 # AWS #
 #######
@@ -158,6 +179,9 @@ echo "Public IP addresses allocated to the tunnels: $aws0toaz0_pip, $aws0toaz1_p
 # Azure #
 #########
 
+# For stuff we need to do over REST
+azvpn_api_version="2022-01-01"
+
 # Create LNGs, update VNG with custom BGP IP addresses (aka APIPAs) and create connections
 az network vnet-gateway update -n "$vpngw_name" -g $rg \
     --set 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses=["169.254.21.2", "169.254.21.6"]' \
@@ -169,12 +193,43 @@ az network local-gateway create -g $rg -n aws01 --gateway-ip-address "$aws0toaz1
 az network local-gateway create -g $rg -n aws10 --gateway-ip-address "$aws1toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.21.5' --peer-weight 0 -l $location
 az network local-gateway create -g $rg -n aws11 --gateway-ip-address "$aws1toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.22.5' --peer-weight 0 -l $location
 
-# Create connections
+# Get VNG ipconfig IDs
+vpngw_config0_id=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'ipConfigurations[0].id' -o tsv)
+vpngw_config1_id=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'ipConfigurations[1].id' -o tsv)
+
+# Create connection: AWS00 (VPNGW0 - AWS0)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws00 --vnet-gateway1 $vpngw_name --local-gateway2 'aws00' -o none
-az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=ResponderOnly'
+# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=ResponderOnly'
+# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=Default'
+aws00cx_id=$(az network vpn-connection show -n aws00 -g $rg --query id -o tsv)
+aws00cx_json=$(az rest --method GET --uri "${aws00cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.2", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.2", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+aws00cx_json_updated=$(echo "$aws00cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${aws00cx_id}?api-version=${azvpn_api_version}" --body "$aws00cx_json_updated"
+
+# Create connection: AWS01 (VPNGW1 - AWS0)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws01 --vnet-gateway1 $vpngw_name --local-gateway2 'aws01' -o none
+aws01cx_id=$(az network vpn-connection show -n aws01 -g $rg --query id -o tsv)
+aws01cx_json=$(az rest --method GET --uri "${aws01cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.2", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.2", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+aws01cx_json_updated=$(echo "$aws01cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${aws01cx_id}?api-version=${azvpn_api_version}" --body "$aws01cx_json_updated"
+
+# Create connection: AWS10 (VPNGW0 - AWS1)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws10 --vnet-gateway1 $vpngw_name --local-gateway2 'aws10' -o none
+aws10cx_id=$(az network vpn-connection show -n aws10 -g $rg --query id -o tsv)
+aws10cx_json=$(az rest --method GET --uri "${aws10cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.6", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.6", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+aws10cx_json_updated=$(echo "$aws10cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${aws10cx_id}?api-version=${azvpn_api_version}" --body "$aws10cx_json_updated"
+
+# Create connection: AWS11 (VPNGW1 - AWS1)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws11 --vnet-gateway1 $vpngw_name --local-gateway2 'aws11' -o none
+aws11cx_id=$(az network vpn-connection show -n aws11 -g $rg --query id -o tsv)
+aws11cx_json=$(az rest --method GET --uri "${aws11cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.6", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.6", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+aws11cx_json_updated=$(echo "$aws11cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${aws11cx_id}?api-version=${azvpn_api_version}" --body "$aws11cx_json_updated"
 
 ###############
 # Diagnostics #
@@ -183,9 +238,15 @@ az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -
 az network vnet-gateway show -n "$vpngw_name" -g "$rg"
 az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses' -o tsv
 az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses' -o tsv
+az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table
+vng0_bgp_ip=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].defaultBgpIpAddresses[0]' -o tsv)
+vng1_bgp_ip=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv)
+az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --query 'value[?localAddress == `'$vng0_bgp_ip'`]'
+az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --query 'value[?localAddress == `'$vng1_bgp_ip'`]'
 az network local-gateway list -g "$rg" -o table
 az network vpn-connection list -g "$rg" -o table
 az network vpn-connection show -n aws00 -g "$rg"
+az rest --method GET --uri "$(az network vpn-connection show -n aws00 -g $rg --query id -o tsv)?api-version=$azvpn_api_version"
 
 aws ec2 describe-vpcs --query 'Vpcs[].[VpcId,CidrBlock]' --output text
 aws ec2 describe-vpcs --vpc-id "$vpc_id"
@@ -199,16 +260,45 @@ aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'
 aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet2_id'`].[RouteTableId,SubnetId]' --output text
 aws ec2 describe-vpn-gateways --query 'VpnGateways[*].[VpnGatewayId,State,AmazonSideAsn,VpcAttachments[0].VpcId]' --output text
 aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId,VpnGatewayId,CustomerGatewayId,State]' --output text
+aws ec2 describe-vpn-connections --query 'VpnConnections[*].VgwTelemetry[*].[OutsideIpAddress,StatusMessage,Status]' --output text
 aws ec2 describe-customer-gateways --query 'CustomerGateways[*].[CustomerGatewayId,DeviceName,BgpAsn,IpAddress,State]' --output text
 aws ec2 describe-security-groups --group-names "$sg_name"
 
 # Tunnel AzVPNGW0 <-> AWS VGW0
 az network vnet-gateway show -n $vpngw_name -g $rg --query '{PIP0:bgpSettings.bgpPeeringAddresses[0].tunnelIpAddresses[0],IP00:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0],IP01:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[1],ASN:bgpSettings.asn}' -o tsv
-az network local-gateway show -n aws00 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
 az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0]' -o tsv
 az network vpn-connection show -n aws00 -g "$rg" --query '{Name:name,Mode:connectionMode,Status:connectionStatus}' -o tsv
+az rest --method GET --uri "${aws00cx_id}?api-version=${azvpn_api_version}" --query '{Name:name,Mode:properties.connectionMode,Status:properties.connectionStatus,BgpIP:properties.gatewayCustomBgpIpAddresses[0].customBgpIpAddress}' -o tsv
+az network local-gateway show -n aws00 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
 aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].Options.TunnelOptions[0].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
 aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].VgwTelemetry[0].[OutsideIpAddress,StatusMessage,Status]' --output text
+
+# Tunnel AzVPNGW1 <-> AWS VGW0
+az network vnet-gateway show -n $vpngw_name -g $rg --query '{PIP1:bgpSettings.bgpPeeringAddresses[1].tunnelIpAddresses[0],IP10:bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[0],IP11:bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[1],ASN:bgpSettings.asn}' -o tsv
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[0]' -o tsv
+az network vpn-connection show -n aws01 -g "$rg" --query '{Name:name,Mode:connectionMode,Status:connectionStatus}' -o tsv
+az rest --method GET --uri "${aws01cx_id}?api-version=${azvpn_api_version}" --query '{Name:name,Mode:properties.connectionMode,Status:properties.connectionStatus,BgpIP:properties.gatewayCustomBgpIpAddresses[1].customBgpIpAddress}' -o tsv
+az network local-gateway show -n aws01 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].Options.TunnelOptions[0].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].VgwTelemetry[0].[OutsideIpAddress,StatusMessage,Status]' --output text
+
+# Tunnel AzVPNGW0 <-> AWS VGW1
+az network vnet-gateway show -n $vpngw_name -g $rg --query '{PIP0:bgpSettings.bgpPeeringAddresses[0].tunnelIpAddresses[0],IP00:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0],IP01:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[1],ASN:bgpSettings.asn}' -o tsv
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0]' -o tsv
+az network vpn-connection show -n aws10 -g "$rg" --query '{Name:name,Mode:connectionMode,Status:connectionStatus}' -o tsv
+az rest --method GET --uri "${aws10cx_id}?api-version=${azvpn_api_version}" --query '{Name:name,Mode:properties.connectionMode,Status:properties.connectionStatus,BgpIP:properties.gatewayCustomBgpIpAddresses[0].customBgpIpAddress}' -o tsv
+az network local-gateway show -n aws10 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].Options.TunnelOptions[1].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].VgwTelemetry[1].[OutsideIpAddress,StatusMessage,Status]' --output text
+
+# Tunnel AzVPNGW1 <-> AWS VGW1
+az network vnet-gateway show -n $vpngw_name -g $rg --query '{PIP1:bgpSettings.bgpPeeringAddresses[1].tunnelIpAddresses[0],IP10:bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[0],IP11:bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[1],ASN:bgpSettings.asn}' -o tsv
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses[0]' -o tsv
+az network vpn-connection show -n aws11 -g "$rg" --query '{Name:name,Mode:connectionMode,Status:connectionStatus}' -o tsv
+az rest --method GET --uri "${aws11cx_id}?api-version=${azvpn_api_version}" --query '{Name:name,Mode:properties.connectionMode,Status:properties.connectionStatus,BgpIP:properties.gatewayCustomBgpIpAddresses[1].customBgpIpAddress}' -o tsv
+az network local-gateway show -n aws11 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].Options.TunnelOptions[1].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].VgwTelemetry[1].[OutsideIpAddress,StatusMessage,Status]' --output text
 
 ###########
 # Cleanup #
