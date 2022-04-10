@@ -19,25 +19,25 @@ vpngw_name=vpngw
 vpngw_asn=65001
 
 # Create RG and VNets
-az group create -n $rg -l $location
-az network vnet create -g $rg -n $vnet_name --address-prefix $vnet_prefix -l $location
-az network vnet subnet create -g $rg -n GatewaySubnet --vnet-name $vnet_name --address-prefix $gateway_subnet_prefix                               
-az network vnet subnet create -g $rg -n vm --vnet-name $vnet_name --address-prefix $vm_subnet_prefix                               
+az group create -n "$rg" -l "$location"
+az network vnet create -g "$rg" -n "$vnet_name" --address-prefix "$vnet_prefix" -l "$location"
+az network vnet subnet create -g "$rg" -n GatewaySubnet --vnet-name "$vnet_name" --address-prefix "$gateway_subnet_prefix"
+az network vnet subnet create -g "$rg" -n vm --vnet-name "$vnet_name" --address-prefix "$vm_subnet_prefix"
 
 # Create test VM
 az vm create -n testvm -g $rg --image UbuntuLTS --generate-ssh-keys --size $vm_sku -l $location \
    --vnet-name $vnet_name --subnet vm --public-ip-address vmtest-pip --public-ip-sku Standard
 
 # Create PIPs and VNGs
-az network public-ip create -g $rg -n ergw-pip --allocation-method Dynamic --sku Basic -l $location -o none
-az network public-ip create -g $rg -n vpngw-a-pip --allocation-method Dynamic --sku Basic -l $location -o none
-az network public-ip create -g $rg -n vpngw-b-pip --allocation-method Dynamic --sku Basic -l $location -o none
-az network vnet-gateway create -g $rg --sku VpnGw1 --gateway-type Vpn --vpn-type RouteBased --vnet $vnet_name -n $vpngw_name --public-ip-addresses vpngw-a-pip vpngw-b-pip --asn $vpngw_asn
-vpngw_pip_0=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.bgpPeeringAddresses[0].tunnelIpAddresses[0]' -o tsv) && echo $vpngw_pip_0
-vpngw_private_ip_0=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.bgpPeeringAddresses[0].defaultBgpIpAddresses[0]' -o tsv) && echo $vpngw_private_ip_0
-vpngw_pip_1=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.bgpPeeringAddresses[1].tunnelIpAddresses[0]' -o tsv) && echo $vpngw_pip_1
-vpngw_private_ip_1=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv) && echo $vpngw_private_ip_1
-vpngw_asn=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'bgpSettings.asn' -o tsv) && echo $vpngw_asn
+az network public-ip create -g "$rg" -n ergw-pip --allocation-method Dynamic --sku Basic -l "$location" -o none
+az network public-ip create -g "$rg" -n vpngw-a-pip --allocation-method Dynamic --sku Basic -l "$location" -o none
+az network public-ip create -g "$rg" -n vpngw-b-pip --allocation-method Dynamic --sku Basic -l "$location" -o none
+az network vnet-gateway create -g "$rg" --sku VpnGw1 --gateway-type Vpn --vpn-type RouteBased --vnet $vnet_name -n $vpngw_name --public-ip-addresses vpngw-a-pip vpngw-b-pip --asn "$vpngw_asn"
+vpngw_pip_0=$(az network vnet-gateway show -n "$vpngw_name" -g $rg --query 'bgpSettings.bgpPeeringAddresses[0].tunnelIpAddresses[0]' -o tsv) && echo "$vpngw_pip_0"
+vpngw_private_ip_0=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].defaultBgpIpAddresses[0]' -o tsv) && echo "$vpngw_private_ip_0"
+vpngw_pip_1=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].tunnelIpAddresses[0]' -o tsv) && echo "$vpngw_pip_1"
+vpngw_private_ip_1=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv) && echo "$vpngw_private_ip_1"
+vpngw_asn=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.asn' -o tsv) && echo "$vpngw_asn"
 
 #######
 # AWS #
@@ -56,12 +56,12 @@ vgw_asn=65002
 ipsec_startup_action='start'
 
 # Create Key Pair if not there
-kp_id=$(aws ec2 describe-key-pairs --key-name $kp_name --query 'KeyPairs[0].KeyPairId' --output text)
+kp_id=$(aws ec2 describe-key-pairs --key-name "$kp_name" --query 'KeyPairs[0].KeyPairId' --output text)
 if [[ -z "$kp_id" ]]; then
     echo "Key pair $kp_name does not exist, creating new..."
     pemfile="$HOME/.ssh/${kp_name}.pem"
     touch "$pemfile"
-    aws ec2 create-key-pair --key-name $kp_name --key-type rsa --query 'KeyMaterial' --output text > $pemfile
+    aws ec2 create-key-pair --key-name $kp_name --key-type rsa --query 'KeyMaterial' --output text > "$pemfile"
     chmod 400 "$pemfile"
 else
     echo "Key pair $kp_name already exists with ID $kp_id"
@@ -154,9 +154,38 @@ echo "Public IP addresses allocated to the tunnels: $aws0toaz0_pip, $aws0toaz1_p
 # aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].TunnelInsideCidr' --output text
 # aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[0].Options.TunnelOptions[0].PreSharedKey' --output text
 
+#########
+# Azure #
+#########
+
+# Create LNGs, update VNG with custom BGP IP addresses (aka APIPAs) and create connections
+az network vnet-gateway update -n "$vpngw_name" -g $rg \
+    --set 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses=["169.254.21.2", "169.254.21.6"]' \
+    --set 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses=["169.254.22.2", "169.254.22.6"]'
+
+# Create LNGs
+az network local-gateway create -g $rg -n aws00 --gateway-ip-address "$aws0toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.21.1' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws01 --gateway-ip-address "$aws0toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.22.1' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws10 --gateway-ip-address "$aws1toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.21.5' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws11 --gateway-ip-address "$aws1toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.22.5' --peer-weight 0 -l $location
+
+# Create connections
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws00 --vnet-gateway1 $vpngw_name --local-gateway2 'aws00' -o none
+az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=ResponderOnly'
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws01 --vnet-gateway1 $vpngw_name --local-gateway2 'aws01' -o none
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws10 --vnet-gateway1 $vpngw_name --local-gateway2 'aws10' -o none
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws11 --vnet-gateway1 $vpngw_name --local-gateway2 'aws11' -o none
+
 ###############
 # Diagnostics #
 ###############
+
+az network vnet-gateway show -n "$vpngw_name" -g "$rg"
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses' -o tsv
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses' -o tsv
+az network local-gateway list -g "$rg" -o table
+az network vpn-connection list -g "$rg" -o table
+az network vpn-connection show -n aws00 -g "$rg"
 
 aws ec2 describe-vpcs --query 'Vpcs[].[VpcId,CidrBlock]' --output text
 aws ec2 describe-vpcs --vpc-id "$vpc_id"
@@ -173,12 +202,22 @@ aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId,Vpn
 aws ec2 describe-customer-gateways --query 'CustomerGateways[*].[CustomerGatewayId,DeviceName,BgpAsn,IpAddress,State]' --output text
 aws ec2 describe-security-groups --group-names "$sg_name"
 
+# Tunnel AzVPNGW0 <-> AWS VGW0
+az network vnet-gateway show -n $vpngw_name -g $rg --query '{PIP0:bgpSettings.bgpPeeringAddresses[0].tunnelIpAddresses[0],IP00:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0],IP01:bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[1],ASN:bgpSettings.asn}' -o tsv
+az network local-gateway show -n aws00 -g "$rg" --query '{PIP:gatewayIpAddress,IP:bgpSettings.bgpPeeringAddress,ASN:bgpSettings.asn}' -o tsv
+az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses[0]' -o tsv
+az network vpn-connection show -n aws00 -g "$rg" --query '{Name:name,Mode:connectionMode,Status:connectionStatus}' -o tsv
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].Options.TunnelOptions[0].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
+aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx0_id" --query 'VpnConnections[*].VgwTelemetry[0].[OutsideIpAddress,StatusMessage,Status]' --output text
 
 ###########
 # Cleanup #
 ###########
 
-# Connections
+# Azure
+az group delete -n $rg -y --no-wait
+
+# AWS Connections
 connection_list=$(aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId]' --output text)
 while read -r connection_id
 do
@@ -186,7 +225,7 @@ do
     aws ec2 delete-vpn-connection --vpn-connection-id "$connection_id"
 done < <(echo "$connection_list")
 
-# CGWs
+# AWS CGWs
 cgw_list=$(aws ec2 describe-customer-gateways --query 'CustomerGateways[*].[CustomerGatewayId]' --output text)
 while read -r cgw_id
 do
@@ -194,7 +233,7 @@ do
     aws ec2 delete-customer-gateway --customer-gateway-id "$cgw_id"
 done < <(echo "$cgw_list")
 
-# VGWs
+# AWS VGWs
 vgw_list=$(aws ec2 describe-vpn-gateways --query 'VpnGateways[*].[VpnGatewayId]' --output text)
 while read -r vgw_id
 do
