@@ -457,7 +457,7 @@ gcloud compute instances describe "$gcp_vm_name"
 az group delete -n $rg -y --no-wait
 
 # Google
-gcloud projects delete "$project_id" --quiet
+gcloud projects delete "$gcp_project_id" --quiet
 
 # AWS instances
 instance_list=$(aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId]' --output text)
