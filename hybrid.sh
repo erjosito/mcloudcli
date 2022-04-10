@@ -188,10 +188,10 @@ az network vnet-gateway update -n "$vpngw_name" -g $rg \
     --set 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses=["169.254.22.2", "169.254.22.6"]'
 
 # Create LNGs
-az network local-gateway create -g $rg -n aws00 --gateway-ip-address "$aws0toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.21.1' --peer-weight 0 -l $location
-az network local-gateway create -g $rg -n aws01 --gateway-ip-address "$aws0toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.22.1' --peer-weight 0 -l $location
-az network local-gateway create -g $rg -n aws10 --gateway-ip-address "$aws1toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.21.5' --peer-weight 0 -l $location
-az network local-gateway create -g $rg -n aws11 --gateway-ip-address "$aws1toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.253.22.5' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws00 --gateway-ip-address "$aws0toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.254.21.1' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws01 --gateway-ip-address "$aws0toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.254.22.1' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws10 --gateway-ip-address "$aws1toaz0_pip" --asn "$vgw_asn" --bgp-peering-address '169.254.21.5' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n aws11 --gateway-ip-address "$aws1toaz1_pip" --asn "$vgw_asn" --bgp-peering-address '169.254.22.5' --peer-weight 0 -l $location
 
 # Get VNG ipconfig IDs
 vpngw_config0_id=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'ipConfigurations[0].id' -o tsv)
@@ -199,37 +199,43 @@ vpngw_config1_id=$(az network vnet-gateway show -n $vpngw_name -g $rg --query 'i
 
 # Create connection: AWS00 (VPNGW0 - AWS0)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws00 --vnet-gateway1 $vpngw_name --local-gateway2 'aws00' -o none
-# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=ResponderOnly'
-# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=Default'
+# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=ResponderOnly' -o none
+# az network vpn-connection update -g $rg -n aws00 --set 'connectionMode=Default' -o none
 aws00cx_id=$(az network vpn-connection show -n aws00 -g $rg --query id -o tsv)
 aws00cx_json=$(az rest --method GET --uri "${aws00cx_id}?api-version=${azvpn_api_version}")
 custom_ip_json='[{"customBgpIpAddress": "169.254.21.2", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.2", "ipConfigurationId": "'$vpngw_config1_id'"}]'
 aws00cx_json_updated=$(echo "$aws00cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
-az rest --method PUT --uri "${aws00cx_id}?api-version=${azvpn_api_version}" --body "$aws00cx_json_updated"
+az rest --method PUT --uri "${aws00cx_id}?api-version=${azvpn_api_version}" --body "$aws00cx_json_updated" -o none
 
 # Create connection: AWS01 (VPNGW1 - AWS0)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws01 --vnet-gateway1 $vpngw_name --local-gateway2 'aws01' -o none
+# az network vpn-connection update -g $rg -n aws01 --set 'connectionMode=ResponderOnly' -o none
+# az network vpn-connection update -g $rg -n aws01 --set 'connectionMode=Default' -o none
 aws01cx_id=$(az network vpn-connection show -n aws01 -g $rg --query id -o tsv)
 aws01cx_json=$(az rest --method GET --uri "${aws01cx_id}?api-version=${azvpn_api_version}")
 custom_ip_json='[{"customBgpIpAddress": "169.254.21.2", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.2", "ipConfigurationId": "'$vpngw_config1_id'"}]'
 aws01cx_json_updated=$(echo "$aws01cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
-az rest --method PUT --uri "${aws01cx_id}?api-version=${azvpn_api_version}" --body "$aws01cx_json_updated"
+az rest --method PUT --uri "${aws01cx_id}?api-version=${azvpn_api_version}" --body "$aws01cx_json_updated" -o none
 
 # Create connection: AWS10 (VPNGW0 - AWS1)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws10 --vnet-gateway1 $vpngw_name --local-gateway2 'aws10' -o none
+# az network vpn-connection update -g $rg -n aws10 --set 'connectionMode=ResponderOnly' -o none
+# az network vpn-connection update -g $rg -n aws10 --set 'connectionMode=Default' -o none
 aws10cx_id=$(az network vpn-connection show -n aws10 -g $rg --query id -o tsv)
 aws10cx_json=$(az rest --method GET --uri "${aws10cx_id}?api-version=${azvpn_api_version}")
 custom_ip_json='[{"customBgpIpAddress": "169.254.21.6", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.6", "ipConfigurationId": "'$vpngw_config1_id'"}]'
 aws10cx_json_updated=$(echo "$aws10cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
-az rest --method PUT --uri "${aws10cx_id}?api-version=${azvpn_api_version}" --body "$aws10cx_json_updated"
+az rest --method PUT --uri "${aws10cx_id}?api-version=${azvpn_api_version}" --body "$aws10cx_json_updated" -o none
 
 # Create connection: AWS11 (VPNGW1 - AWS1)
 az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n aws11 --vnet-gateway1 $vpngw_name --local-gateway2 'aws11' -o none
+# az network vpn-connection update -g $rg -n aws11 --set 'connectionMode=ResponderOnly' -o none
+# az network vpn-connection update -g $rg -n aws11 --set 'connectionMode=Default' -o none
 aws11cx_id=$(az network vpn-connection show -n aws11 -g $rg --query id -o tsv)
 aws11cx_json=$(az rest --method GET --uri "${aws11cx_id}?api-version=${azvpn_api_version}")
 custom_ip_json='[{"customBgpIpAddress": "169.254.21.6", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.6", "ipConfigurationId": "'$vpngw_config1_id'"}]'
 aws11cx_json_updated=$(echo "$aws11cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
-az rest --method PUT --uri "${aws11cx_id}?api-version=${azvpn_api_version}" --body "$aws11cx_json_updated"
+az rest --method PUT --uri "${aws11cx_id}?api-version=${azvpn_api_version}" --body "$aws11cx_json_updated" -o none
 
 ###############
 # Diagnostics #
@@ -245,6 +251,7 @@ az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --qu
 az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --query 'value[?localAddress == `'$vng1_bgp_ip'`]'
 az network local-gateway list -g "$rg" -o table
 az network vpn-connection list -g "$rg" -o table
+az network vpn-connection list -g "$rg" -o table --query '[].{Name:name,EgressBytes:egressBytesTransferred,IngressBytes:ingressBytesTransferred,Mode:connectionMode}'
 az network vpn-connection show -n aws00 -g "$rg"
 az rest --method GET --uri "$(az network vpn-connection show -n aws00 -g $rg --query id -o tsv)?api-version=$azvpn_api_version"
 
