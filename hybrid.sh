@@ -237,6 +237,130 @@ custom_ip_json='[{"customBgpIpAddress": "169.254.21.6", "ipConfigurationId": "'$
 aws11cx_json_updated=$(echo "$aws11cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
 az rest --method PUT --uri "${aws11cx_id}?api-version=${azvpn_api_version}" --body "$aws11cx_json_updated" -o none
 
+
+##########
+# Google #
+##########
+
+# Variables
+gcp_project_name=multicloud
+gcp_project_id="${gcp_project_name}${RANDOM}"
+gcp_vm_name=myvm
+gcp_machine_type=e2-micro
+gcp_region=us-east1
+gcp_zone=us-east1-c
+gcp_vpc_name=multicloud
+gcp_subnet_name=web
+gcp_subnet_prefix='10.0.1.0/24'
+gcp_gw_name=vpngw
+gcp_router_name=router
+gcp_asn=65003
+
+# Get environment info
+gcp_billing_account=$(gcloud beta billing accounts list --format json | jq -r '.[0].name')
+gcp_billing_account_short=$(echo "$gcp_billing_account" | cut -f 2 -d/)
+
+# Create project
+gcloud projects create $gcp_project_id --name $gcp_project_name
+gcloud config set project $gcp_project_id
+gcloud config set compute/region $gcp_region
+gcloud beta billing projects link "$gcp_project_id" --billing-account "$gcp_billing_account_short"
+gcloud services enable compute.googleapis.com
+
+# Delete default VPC
+gcloud compute firewall-rules delete default-allow-rdp --quiet
+gcloud compute firewall-rules delete default-allow-icmp --quiet
+gcloud compute firewall-rules delete default-allow-internal --quiet
+gcloud compute firewall-rules delete default-allow-ssh --quiet
+gcloud compute networks delete default --quiet
+
+# Create custom VPC
+gcloud compute networks create $gcp_vpc_name --bgp-routing-mode=regional --mtu=1500 --subnet-mode=custom
+gcloud compute networks subnets create $gcp_subnet_name --network $gcp_vpc_name --range $gcp_subnet_prefix --region=$gcp_region
+gcloud compute firewall-rules create multicloud-allow-icmp-192-168 --network $gcp_vpc_name \
+    --priority=1000 --direction=INGRESS --rules=icmp --source-ranges=192.168.0.0/16 --action=ALLOW
+
+# Create instance
+gcloud compute images list --format json | jq -r '.[] | select(.family | contains("ubuntu-2004-lts")) | {id,family,name,status}|join("\t")'
+gcp_image_id=$(gcloud compute images list --format json | jq -r '.[] | select(.family | contains("ubuntu-2004-lts")).id') && echo $gcp_image_id
+gcp_image_name=$(gcloud compute images list --format json | jq -r '.[] | select(.family | contains("ubuntu-2004-lts")).name') && echo $gcp_image_name
+gcloud compute instances create $gcp_vm_name --image-family=ubuntu-2004-lts --image-project=ubuntu-os-cloud --machine-type $gcp_machine_type --network $gcp_vpc_name \
+    --subnet $gcp_subnet_name --zone $gcp_zone
+
+# Create VPN gateway
+gcloud compute vpn-gateways create $gcp_gw_name --network $gcp_vpc_name --region $gcp_region
+gcp_gw_id=$(gcloud compute vpn-gateways describe $gcp_gw_name --region $gcp_region --format json | jq -r '.id') && echo "$gcp_gw_id"
+gcp_gw_pip0=$(gcloud compute vpn-gateways describe $gcp_gw_name --region $gcp_region --format json | jq -r '.vpnInterfaces[0].ipAddress') && echo "$gcp_gw_pip0"
+gcp_gw_pip1=$(gcloud compute vpn-gateways describe $gcp_gw_name --region $gcp_region --format json | jq -r '.vpnInterfaces[1].ipAddress') && echo "$gcp_gw_pip1"
+
+# Create peer VPN gateways for Azure
+gcloud compute external-vpn-gateways create azvpngw --interfaces "0=${vpngw_pip_0},1=${vpngw_pip_1}"
+
+# Create router
+gcloud compute routers create "$gcp_router_name" --region=$gcp_region --network=$gcp_vpc_name --asn=$gcp_asn
+
+# Add additional APIPAs to VNG
+az network vnet-gateway update -n "$vpngw_name" -g $rg \
+    --set 'bgpSettings.bgpPeeringAddresses[0].customBgpIpAddresses=["169.254.21.2", "169.254.21.6", "169.254.21.130"]' \
+    --set 'bgpSettings.bgpPeeringAddresses[1].customBgpIpAddresses=["169.254.22.2", "169.254.22.6", "169.254.22.130"]'
+
+# Create tunnels (GCP side)
+gcloud compute vpn-tunnels create azvpngw0 \
+   --peer-external-gateway=azvpngw \
+   --peer-external-gateway-interface=0  \
+   --region=$gcp_region \
+   --ike-version=2 \
+   --shared-secret=$ipsec_psk \
+   --router=$gcp_router_name \
+   --vpn-gateway=$gcp_gw_name \
+   --interface=0
+gcloud compute vpn-tunnels create azvpngw1 \
+   --peer-external-gateway=azvpngw \
+   --peer-external-gateway-interface=1  \
+   --region=$gcp_region \
+   --ike-version=2 \
+   --shared-secret=$ipsec_psk \
+   --router=$gcp_router_name \
+   --vpn-gateway=$gcp_gw_name \
+   --interface=1
+
+# Create router interfaces
+# vng0_bgp_ip=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[0].defaultBgpIpAddresses[0]' -o tsv)
+# vng1_bgp_ip=$(az network vnet-gateway show -n "$vpngw_name" -g "$rg" --query 'bgpSettings.bgpPeeringAddresses[1].defaultBgpIpAddresses[0]' -o tsv)
+gcloud compute routers add-interface $gcp_router_name --region=$gcp_region \
+   --interface-name=azvpngw0 --ip-address 169.254.21.129 --mask-length=30 --vpn-tunnel=azvpngw0
+gcloud compute routers add-bgp-peer $gcp_router_name --interface=azvpngw0 --region=$gcp_region \
+   --peer-name=azvpngw0 --peer-ip-address=169.254.21.130 --peer-asn="$vpngw_asn"
+gcloud compute routers add-interface $gcp_router_name --region=$gcp_region \
+   --interface-name=azvpngw1 --ip-address 169.254.22.129 --mask-length=30 --vpn-tunnel=azvpngw1
+gcloud compute routers add-bgp-peer $gcp_router_name --interface=azvpngw1 --region=$gcp_region \
+   --peer-name=azvpngw1  --peer-ip-address=169.254.22.130 --peer-asn="$vpngw_asn"
+
+# If you need to delete the interfaces/peers
+# gcloud compute routers remove-interface $gcp_router_name --interface-name azvpngw0
+# gcloud compute routers remove-bgp-peer $gcp_router_name --peer-name azvpngw0
+# gcloud compute routers remove-interface $gcp_router_name --interface-name azvpngw1
+# gcloud compute routers remove-bgp-peer $gcp_router_name --peer-name azvpngw1
+
+# Create LNGs and connections (Azure side)
+az network local-gateway create -g $rg -n gcp0 --gateway-ip-address "$gcp_gw_pip0" --asn "$gcp_asn" --bgp-peering-address '169.254.21.129' --peer-weight 0 -l $location
+az network local-gateway create -g $rg -n gcp1 --gateway-ip-address "$gcp_gw_pip1" --asn "$gcp_asn" --bgp-peering-address '169.254.22.129' --peer-weight 0 -l $location
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n gcp0 --vnet-gateway1 $vpngw_name --local-gateway2 gcp0 -o none
+az network vpn-connection create -g $rg --shared-key "$ipsec_psk" --enable-bgp -n gcp1 --vnet-gateway1 $vpngw_name --local-gateway2 gcp1 -o none
+
+# Update Azure connections to use right APIPA as source
+gcp0cx_id=$(az network vpn-connection show -n gcp0 -g $rg --query id -o tsv)
+gcp0cx_json=$(az rest --method GET --uri "${gcp0cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.130", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.130", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+gcp0cx_json_updated=$(echo "$gcp0cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${gcp0cx_id}?api-version=${azvpn_api_version}" --body "$gcp0cx_json_updated" -o none
+gcp1cx_id=$(az network vpn-connection show -n gcp1 -g $rg --query id -o tsv)
+gcp1cx_json=$(az rest --method GET --uri "${gcp1cx_id}?api-version=${azvpn_api_version}")
+custom_ip_json='[{"customBgpIpAddress": "169.254.21.130", "ipConfigurationId": "'$vpngw_config0_id'"},{"customBgpIpAddress": "169.254.22.130", "ipConfigurationId": "'$vpngw_config1_id'"}]'
+gcp1cx_json_updated=$(echo "$gcp1cx_json" | jq ".properties.gatewayCustomBgpIpAddresses=$custom_ip_json")
+az rest --method PUT --uri "${gcp1cx_id}?api-version=${azvpn_api_version}" --body "$gcp1cx_json_updated" -o none
+
+
 ###############
 # Diagnostics #
 ###############
@@ -251,7 +375,7 @@ az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --qu
 az network vnet-gateway list-bgp-peer-status -n $vpngw_name -g $rg -o table --query 'value[?localAddress == `'$vng1_bgp_ip'`]'
 az network local-gateway list -g "$rg" -o table
 az network vpn-connection list -g "$rg" -o table
-az network vpn-connection list -g "$rg" -o table --query '[].{Name:name,EgressBytes:egressBytesTransferred,IngressBytes:ingressBytesTransferred,Mode:connectionMode}'
+az network vpn-connection list -g "$rg" -o table --query '[].{Name:name,EgressBytes:egressBytesTransferred,IngressBytes:ingressBytesTransferred,Mode:connectionMode,Status:tunnelConnectionStatus[0].connectionStatus,TunnelName:tunnelConnectionStatus[0].tunnel}'
 az network vpn-connection show -n aws00 -g "$rg"
 az rest --method GET --uri "$(az network vpn-connection show -n aws00 -g $rg --query id -o tsv)?api-version=$azvpn_api_version"
 
@@ -265,6 +389,7 @@ aws ec2 describe-route-tables --query 'RouteTables[].[RouteTableId,VpcId]' --out
 aws ec2 describe-route-tables --query 'RouteTables[?VpcId==`'$vpc_id'`].[RouteTableId,VpcId]' --output text
 aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet1_id'`].[RouteTableId,SubnetId]' --output text
 aws ec2 describe-route-tables --query 'RouteTables[*].Associations[?SubnetId==`'$subnet2_id'`].[RouteTableId,SubnetId]' --output text
+aws ec2 describe-route-tables --query 'RouteTables[*].Routes[].[State,DestinationCidrBlock,Origin,GatewayId]' --output text
 aws ec2 describe-vpn-gateways --query 'VpnGateways[*].[VpnGatewayId,State,AmazonSideAsn,VpcAttachments[0].VpcId]' --output text
 aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId,VpnGatewayId,CustomerGatewayId,State]' --output text
 aws ec2 describe-vpn-connections --query 'VpnConnections[*].VgwTelemetry[*].[OutsideIpAddress,StatusMessage,Status]' --output text
@@ -307,12 +432,40 @@ az network local-gateway show -n aws11 -g "$rg" --query '{PIP:gatewayIpAddress,I
 aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].Options.TunnelOptions[1].[OutsideIpAddress,TunnelInsideCidr,StartupAction]' --output text
 aws ec2 describe-vpn-connections --vpn-connection-id "$vpncx1_id" --query 'VpnConnections[*].VgwTelemetry[1].[OutsideIpAddress,StatusMessage,Status]' --output text
 
+# GCP
+
+gcloud projects list
+gcloud compute networks list
+gcloud compute networks subnets list --network "$gcp_vpc_name"
+gcloud compute vpn-gateways describe $gcp_gw_name --region $gcp_region
+gcloud compute external-vpn-gateways list
+gcloud compute external-vpn-gateways describe azvpngw
+gcloud compute vpn-tunnels list --format json | jq -r '.[] | {name,peerIp,status,detailedStatus}|join("\t")'
+gcloud compute vpn-tunnels describe azvpngw0
+gcloud compute vpn-tunnels describe azvpngw1
+gcloud compute routers describe "$gcp_router_name" --region $gcp_region --format json
+gcloud compute routers get-status $gcp_router_name --region=$gcp_region --format='flattened(result.bgpPeerStatus[].name,result.bgpPeerStatus[].ipAddress, result.bgpPeerStatus[].peerIpAddress)'
+gcloud compute routers get-status $gcp_router_name --region=$gcp_region --format=json | jq -r '.result.bestRoutesForRouter[]|{destRange,routeType,nextHopIp} | join("\t")'
+
+gcloud compute instances describe "$gcp_vm_name"
+
 ###########
 # Cleanup #
 ###########
 
 # Azure
 az group delete -n $rg -y --no-wait
+
+# Google
+gcloud projects delete "$project_id" --quiet
+
+# AWS instances
+instance_list=$(aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId]' --output text)
+while read -r instance_id
+do
+    echo "Terminating instance ${instance_id}..."
+    aws ec2 terminate-instances --instance-ids "${instance_id}"
+done < <(echo "$instance_list")
 
 # AWS Connections
 connection_list=$(aws ec2 describe-vpn-connections --query 'VpnConnections[*].[VpnConnectionId]' --output text)
@@ -340,3 +493,43 @@ do
     echo "Deleting VGW ${vgw_id}..."
     aws ec2 delete-vpn-gateway --vpn-gateway-id "$vgw_id"
 done < <(echo "$vgw_list")
+
+# AWS SGs
+sg_list=$(aws ec2 describe-security-groups --query 'SecurityGroups[*].[GroupId]' --output text)
+while read -r sg_id
+do
+    echo "Deleting SG ${sg_id}..."
+    aws ec2 delete-security-group --group-id "$sg_id"
+done < <(echo "$sg_list")
+
+# AWS Subnets
+subnet_list=$(aws ec2 describe-subnets --query 'Subnets[*].[SubnetId]' --output text)
+while read -r subnet_id
+do
+    echo "Deleting subnet ${subnet_id}..."
+    aws ec2 delete-subnet --subnet-id "$subnet_id"
+done < <(echo "$subnet_list")
+
+# AWS InternetGateways
+igw_list=$(aws ec2 describe-internet-gateways --query 'InternetGateways[*].[InternetGatewayId]' --output text)
+while read -r igw_id
+do
+    echo "Deleting IGW ${igw_id}..."
+    aws ec2 delete-internet-gateway --internet-gateway-id "$igw_id"
+done < <(echo "$igw_list")
+
+# AWS RTs
+rt_list=$(aws ec2 describe-route-tables --query 'RouteTables[*].[RouteTableId]' --output text)
+while read -r rt_id
+do
+    echo "Deleting RT ${rt_id}..."
+    aws ec2 delete-route-table --route-table-id "$rt_id"
+done < <(echo "$rt_list")
+
+# AWS VPCs
+vpc_list=$(aws ec2 describe-vpcs --query 'Vpcs[*].[VpcId]' --output text)
+while read -r vpc_id
+do
+    echo "Deleting VPC ${vpc_id}..."
+    aws ec2 delete-vpc --vpc-id "$vpc_id"
+done < <(echo "$vpc_list")
