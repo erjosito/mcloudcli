@@ -258,12 +258,13 @@ gcp_asn=65003
 
 # Get environment info
 gcp_billing_account=$(gcloud beta billing accounts list --format json | jq -r '.[0].name')
-gcp_billing_account_short=$(echo "$gcp_billing_account" | cut -f 2 -d/)
+gcp_billing_account_short=$(echo "$gcp_billing_account" | cut -f 2 -d/) && echo "$gcp_billing_account_short"
 
 # Create project
 gcloud projects create $gcp_project_id --name $gcp_project_name
 gcloud config set project $gcp_project_id
 gcloud config set compute/region $gcp_region
+sleep 30    # This takes a while
 gcloud beta billing projects link "$gcp_project_id" --billing-account "$gcp_billing_account_short"
 gcloud services enable compute.googleapis.com
 
@@ -279,6 +280,9 @@ gcloud compute networks create $gcp_vpc_name --bgp-routing-mode=regional --mtu=1
 gcloud compute networks subnets create $gcp_subnet_name --network $gcp_vpc_name --range $gcp_subnet_prefix --region=$gcp_region
 gcloud compute firewall-rules create multicloud-allow-icmp-192-168 --network $gcp_vpc_name \
     --priority=1000 --direction=INGRESS --rules=icmp --source-ranges=192.168.0.0/16 --action=ALLOW
+# Other examples:
+# gcloud compute firewall-rules create <FIREWALL_NAME> --network $gcp_vpc_name --allow tcp,udp,icmp --source-ranges <IP_RANGE>
+# gcloud compute firewall-rules create <FIREWALL_NAME> --network $gcp_vpc_name --allow tcp:22,tcp:3389,icmp
 
 # Create instance
 gcloud compute images list --format json | jq -r '.[] | select(.family | contains("ubuntu-2004-lts")) | {id,family,name,status}|join("\t")'
