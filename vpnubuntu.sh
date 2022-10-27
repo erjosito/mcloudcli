@@ -14,6 +14,8 @@ vnet_prefix=10.0.1.0/24
 subnet_name=nva
 subnet_prefix=10.0.1.0/26
 azure_vm_name=nva01
+nsg_name="${azure_vm_name}-nsg"
+pip_name="${azure_vm_name}-pip"
 ipsec_psk='Microsoft123!'
 azure_asn=65001
 
@@ -27,7 +29,11 @@ gcp_vm_name=nva02
 gcp_vpc_name=vpc
 gcp_subnet_name=nva
 gcp_subnet_prefix='10.0.2.0/24'
+gcp_private_ip='10.0.2.2'
 gcp_asn=65002
+gcp_router_name=mygcprouter
+gcp_router_asn=65010
+# gcp_router_asn=16550
 
 # Helper function
 function first_ip(){
@@ -42,8 +48,6 @@ function first_ip(){
 # Create Azure environment
 echo "Creating Azure resource group..."
 az group create -n $rg -l $location -o none
-nsg_name="${azure_vm_name}-nsg"
-pip_name="${azure_vm_name}-pip"
 echo "Creating Azure virtual machine..."
 az vm create -n $azure_vm_name -g $rg -l $location --image ubuntuLTS --generate-ssh-keys --nsg $nsg_name -o none \
     --public-ip-sku Standard --public-ip-address $pip_name --size $vm_size -l $location -o none \
@@ -56,7 +60,7 @@ echo "Updating Azure NSG..."
 az network nsg rule create -n UDP500in --nsg-name $nsg_name -g $rg --priority 1010 --destination-port-ranges 500 --access Allow --protocol Udp -o none
 az network nsg rule create -n UDP4500in --nsg-name $nsg_name -g $rg --priority 1020 --destination-port-ranges 4500 --access Allow --protocol Udp -o none
 echo "Trying out access to Azure VM..."
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $azure_public_ip "ip a"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$azure_public_ip" "ip a"
 
 # Create Google Cloud environment
 account=$(gcloud info --format json | jq -r '.config.account')
@@ -68,17 +72,20 @@ gcloud beta billing projects link "$project_id" --billing-account "$billing_acco
 gcloud services enable compute.googleapis.com
 gcloud compute networks create "$gcp_vpc_name" --bgp-routing-mode=regional --mtu=1500 --subnet-mode=custom
 gcloud compute networks subnets create "$gcp_subnet_name" --network "$gcp_vpc_name" --range "$gcp_subnet_prefix" --region=$region
-gcloud compute instances create "$gcp_vm_name" --image-family=ubuntu-2004-lts --image-project=ubuntu-os-cloud --machine-type "$machine_type" --network "$gcp_vpc_name" --subnet "$gcp_subnet_name" --zone "$zone"
+gcloud compute addresses create "${gcp_vm_name}-ip" --region $region --subnet $gcp_subnet_name --addresses "$gcp_private_ip"
+gcloud compute instances create "$gcp_vm_name" --image-family=ubuntu-2004-lts --image-project=ubuntu-os-cloud --machine-type "$machine_type" --can-ip-forward \
+      --network "$gcp_vpc_name" --subnet "$gcp_subnet_name" --private-network-ip "${gcp_vm_name}-ip" --zone "$zone"
 gcloud compute firewall-rules create "${gcp_vpc_name}-allow-icmp" --network "$gcp_vpc_name" --priority=1000 --direction=INGRESS --rules=icmp --source-ranges=0.0.0.0/0 --action=ALLOW
 gcloud compute firewall-rules create "${gcp_vpc_name}-allow-ssh" --network "$gcp_vpc_name" --priority=1010 --direction=INGRESS --rules=tcp:22 --source-ranges=0.0.0.0/0 --action=ALLOW
 gcloud compute firewall-rules create "${gcp_vpc_name}-allow-ike" --network "$gcp_vpc_name" --priority=1020 --direction=INGRESS --rules=udp:500 --source-ranges=0.0.0.0/0 --action=ALLOW
 gcloud compute firewall-rules create "${gcp_vpc_name}-allow-natt" --network "$gcp_vpc_name" --priority=1030 --direction=INGRESS --rules=udp:4500 --source-ranges=0.0.0.0/0 --action=ALLOW
+gcloud compute firewall-rules create "${gcp_vpc_name}-allow-bgp" --network "$gcp_vpc_name" --priority=1030 --direction=INGRESS --rules=tcp:179 --source-ranges=10.0.0.0/8 --action=ALLOW
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="ip a"
-gcp_private_ip=$(gcloud compute instances describe $gcp_vm_name --zone "$zone" --format=json | jq -r '.networkInterfaces[0].networkIP') && echo $gcp_private_ip
-gcp_public_ip=$(gcloud compute instances describe $gcp_vm_name --zone $zone --format='get(networkInterfaces[0].accessConfigs[0].natIP)') && echo $gcp_public_ip
+gcp_private_ip=$(gcloud compute instances describe $gcp_vm_name --zone "$zone" --format=json | jq -r '.networkInterfaces[0].networkIP') && echo "$gcp_private_ip"
+gcp_public_ip=$(gcloud compute instances describe $gcp_vm_name --zone $zone --format='get(networkInterfaces[0].accessConfigs[0].natIP)') && echo "$gcp_public_ip"
 
 # Add software
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $azure_public_ip "sudo apt update && sudo apt install -y strongswan bird"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$azure_public_ip" "sudo apt update && sudo apt install -y strongswan bird"
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo apt update && sudo apt install -y strongswan bird net-tools"
 
 # VTI interfaces and static routes
@@ -269,6 +276,93 @@ gcloud compute scp --zone=$zone $bird_config_file $gcp_vm_name:~/
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo mv ./bird.conf /etc/bird/bird.conf"
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo systemctl restart bird"
 
+######################
+# Modify VPC routing #
+######################
+
+# Variables
+peer_name=gcpnva
+gcp_router_ip0=10.0.2.250
+gcp_router_ip1=10.0.2.251
+ncc_hub_name=hub
+ncc_spoke_name=router-spoke
+
+# Enable connectivity API and create GCC
+gcloud services enable networkconnectivity.googleapis.com
+gcloud network-connectivity hubs create $ncc_hub_name --description="My Network Connectivity Center"
+ncc_hub_uri="https://www.googleapis.com/networkconnectivity/$(gcloud network-connectivity hubs describe $ncc_hub_name --format=json | jq -r '.name')" && echo "$ncc_hub_uri"
+nva_uri=$(gcloud compute instances describe "${gcp_vm_name}" --zone=$zone --format=json | jq -r '.selfLink') && echo $nva_uri
+gcloud network-connectivity spokes linked-router-appliances create $ncc_spoke_name --hub "$ncc_hub_uri" --description="Ubuntu NVA" \
+      --router-appliance=instance=$nva_uri,ip=$gcp_private_ip --region=$region
+ 
+# Create router
+gcloud compute routers create $gcp_router_name --project=$project_id --network=$gcp_vpc_name --asn=$gcp_router_asn --region=$region
+gcloud compute routers add-interface $gcp_router_name --region=$region --subnetwork=$gcp_subnet_name --interface-name=${gcp_router_name}-0 --ip-address $gcp_router_ip0
+gcloud compute routers add-bgp-peer $gcp_router_name --interface=${gcp_router_name}-0 --region=$region --peer-name=${peer_name}-0 --peer-ip-address=$gcp_private_ip --peer-asn="$gcp_asn"
+gcloud compute routers add-interface $gcp_router_name --region=$region --subnetwork=$gcp_subnet_name --interface-name=${gcp_router_name}-1 --ip-address $gcp_router_ip1
+gcloud compute routers add-bgp-peer $gcp_router_name --interface=${gcp_router_name}-1 --region=$region --peer-name=${peer_name}-1  --peer-ip-address=$gcp_private_ip --peer-asn="$gcp_asn"
+
+# Configure BGP with Bird (Google)
+bird_config_file=/tmp/bird.conf
+cat <<EOF > $bird_config_file
+log syslog all;
+router id $gcp_private_ip;
+protocol device {
+        scan time 10;
+}
+protocol direct {
+      disabled;
+}
+protocol kernel {
+      preference 254;
+      learn;
+      merge paths on;
+#      import filter {
+#          if net ~ ${azure_private_ip}/32 then accept;
+#          else reject;
+#      };
+#      export filter {
+#          if net ~ ${azure_private_ip}/32 then reject;
+#          else accept;
+#      };
+      import filter {reject;};
+      export filter {reject;};
+}
+protocol static {
+      import all;
+      # Test route
+      route 2.2.2.2/32 via $gcp_default_gw;
+}
+protocol bgp azure {
+      description "Azure NVA";
+      multihop;
+      local $gcp_private_ip as $gcp_asn;
+      neighbor $azure_private_ip as $azure_asn;
+          import filter {accept;};
+          export filter {accept;};
+}
+protocol bgp gcprouter0 {
+      description "GCP Router interface 0";
+      multihop;
+      local $gcp_private_ip as $gcp_asn;
+      neighbor $gcp_router_ip0 as $gcp_router_asn;
+          import filter {accept;};
+          export filter {accept;};
+}
+protocol bgp gcprouter1 {
+      description "GCP Router interface 1";
+      multihop;
+      local $gcp_private_ip as $gcp_asn;
+      neighbor $gcp_router_ip1 as $gcp_router_asn;
+          import filter {accept;};
+          export filter {accept;};
+}
+EOF
+echo "Copying BGP config file to Google Cloud..."
+gcloud compute scp --zone=$zone $bird_config_file $gcp_vm_name:~/
+gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo mv ./bird.conf /etc/bird/bird.conf"
+gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo systemctl restart bird"
+
 
 ###############
 # Diagnostics #
@@ -309,6 +403,10 @@ gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo ipsec status"
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="ping -c 5 $azure_private_ip"
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="systemctl status bird"
 gcloud compute ssh $gcp_vm_name --zone=$zone --command="sudo birdc show prot"
+
+# VPC
+gcloud compute networks list
+gcloud compute routes list --filter=$gcp_vpc_name
 
 #############
 #  Cleanup  #
